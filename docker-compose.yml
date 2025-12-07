@@ -1,0 +1,42 @@
+# How to use:
+# 1. Build the dev image
+# docker compose -f docker-compose.yml build
+
+# 2. Start the container
+# docker compose -f docker-compose.yml up -d
+
+# 3. Get a shell inside
+# docker compose -f docker-compose.yml exec cs336hw5 bash
+
+
+services:
+  cs336hw5:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    image: cs336hw5:latest
+    container_name: cs336hw5
+
+    volumes:
+      - .:/app   # <--- add this
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+
+    ipc: host
+    shm_size: "32g"
+
+    working_dir: /app
+    tty: true
+    stdin_open: true
+
+    # For dev: drop into shell. You can change this to
+    #   command: ["llamafactory-cli", "webui"]
+    # if you want it to auto-launch the GUI.
+    command: ["bash"]
