@@ -58,3 +58,12 @@ def get_response_log_probs(model: PreTrainedModel, input_ids: torch.Tensor, labe
     if return_token_entropy:
         res['token_entropy'] = compute_entropy(logits)
     return res
+
+
+def masked_normalize(tensor: torch.Tensor, mask: torch.Tensor, normalize_constant: float,
+                     dim: int | None = None) -> torch.Tensor:
+    assert normalize_constant > 0, "Normalization constant must be > 0"
+
+    masked_tensor = torch.where(mask, tensor, 0.0)
+    total = torch.sum(masked_tensor, dim=dim)
+    return total / normalize_constant
