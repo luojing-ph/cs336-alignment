@@ -32,6 +32,7 @@ def save_model_and_tokenizer(model, tokenizer, config):
     tokenizer.save_pretrained(out_dir)
 
     print(f"Model and tokenizer saved to {out_dir}")
+    return out_dir
 
 
 def print_formatted_dict(data: dict) -> None:

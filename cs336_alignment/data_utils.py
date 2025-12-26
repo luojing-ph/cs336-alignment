@@ -63,11 +63,13 @@ def load_and_format_prompts(data_path: str, prompt_path: str) -> tuple[list[str]
         prompt = file.read()
 
     prompts = []
+    cot = []
     answers = []
     with open(data_path, "r") as file:
         for line in file:
             data = json.loads(line)
             prompts.append(prompt.format(question=data["question"]))
+            cot.append(convert_cot_to_think_answer(data["answer"]))
             answers.append(extract_gsm8k_answer(data["answer"]))
 
-    return prompts, answers
+    return prompts, cot, answers
