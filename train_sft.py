@@ -65,8 +65,8 @@ class TrainConfig:
 class EvaluateConfig:
     data_path: str = "./data/gsm8k/test.jsonl"
     prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt"
-    temperature: float = 1.0
-    top_p: float = 1.0
+    temperature: float = 0.1
+    top_p: float = 0.9
     max_tokens: int = 256
 
 
@@ -178,7 +178,7 @@ def run_vllm_logging_from_checkpoint(
         num_example: int = 3,
 ):
     # Create vLLM just for this evaluation
-    vllm = init_vllm_from_path(model_path=str(ckpt_dir), seed=seed, gpu_memory_utilization=0.2)
+    vllm = init_vllm_from_path(model_path=str(ckpt_dir), seed=seed, gpu_memory_utilization=0.6)
 
     try:
         sp = SamplingParams(
@@ -213,17 +213,19 @@ def evaluate_vllm(
 ):
     responses = get_response(vllm_model, prompts, eval_sampling_params)
     allinfo_dict_list = []
-    for response, answer, prompt in zip(responses, answers, prompts):
+    for response, answer in zip(responses, answers):
         # extracted_answer = extract_reference_answer(response)
         reward_dict = reward_fn(response, answer)
         allinfo_dict_list.append(reward_dict)
 
-    overview = {"correct": 0, "format_wrong": 0, "answer_wrong": 0, "count": 0}
+    overview = {"correct": 0, "format_wrong": 0, "format_correct": 0, "answer_wrong": 0, "count": 0}
     for reward in allinfo_dict_list:
         overview["count"] += 1
         if reward["reward"] == 1:
             overview["correct"] += 1
+            overview["format_correct"] += 1
         elif reward["format_reward"] == 1:
+            overview["format_correct"] += 1
             overview["answer_wrong"] += 1
         else:
             overview["format_wrong"] += 1
@@ -249,6 +251,9 @@ def evaluate_sft_model(config: EvaluateConfig, vllm: LLM, eval_step: int):
             "eval/correct": results["correct"],
             "eval/answer_wrong": results["answer_wrong"],
             "eval/format_wrong": results["format_wrong"],
+            "eval/accuracy": results["correct"] / results["count"],
+            "eval/format_accuracy": results["format_correct"] / results["count"],
+            "eval/correct_answer_out_of_correct_format": results["correct"] / results["format_correct"],
             "eval_step": eval_step,
         }
     )
@@ -316,9 +321,9 @@ def train_sft_model(
     while True:
         for i, data in enumerate(dataloader):
             total_micro_steps += 1
-            input_ids = data["input_ids"].to(train_config.train_device)
-            labels = data["labels"].to(train_config.train_device)
-            response_mask = data["response_mask"].to(train_config.train_device)
+            input_ids = data["input_ids"].to(train_config.train_device, non_blocking=True)
+            labels = data["labels"].to(train_config.train_device, non_blocking=True)
+            response_mask = data["response_mask"].to(train_config.train_device, non_blocking=True)
 
             with ctx:
                 log_prob = get_response_log_probs(model=model, input_ids=input_ids, labels=labels)
@@ -338,12 +343,12 @@ def train_sft_model(
                 optimizer.zero_grad()
 
                 print(
-                    f"[train] Step {cur_step} | Loss: {batch_loss / train_config.gradient_accumulation_steps:.4f} | LR: {adj_lr:.6f}"
+                    f"[train] Step {cur_step} | Loss: {batch_loss:.4f} | LR: {adj_lr:.6f}"
                 )
 
                 wandb.log(
                     {
-                        "train/loss": batch_loss / train_config.gradient_accumulation_steps,
+                        "train/loss": batch_loss,
                         "train/lr": adj_lr,
                         "train_step": cur_step,
                     }
@@ -405,7 +410,7 @@ def train_sft_model(
                     model.to("cpu")
                     torch.cuda.empty_cache()
 
-                    vllm = init_vllm_from_path(model_path=str(ckpt_dir), seed=42, gpu_memory_utilization=0.2)
+                    vllm = init_vllm_from_path(model_path=str(ckpt_dir), seed=42, gpu_memory_utilization=0.6)
                     try:
                         evaluate_sft_model(eval_config, vllm, eval_step=cur_step)
                     finally:
