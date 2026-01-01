@@ -178,7 +178,7 @@ def run_vllm_logging_from_checkpoint(
         num_example: int = 3,
 ):
     # Create vLLM just for this evaluation
-    vllm = init_vllm_from_path(model_path=str(ckpt_dir), seed=seed, gpu_memory_utilization=0.6)
+    vllm = init_vllm_from_path(model_path=str(ckpt_dir), seed=seed, gpu_memory_utilization=0.5)
 
     try:
         sp = SamplingParams(
@@ -410,7 +410,7 @@ def train_sft_model(
                     model.to("cpu")
                     torch.cuda.empty_cache()
 
-                    vllm = init_vllm_from_path(model_path=str(ckpt_dir), seed=42, gpu_memory_utilization=0.6)
+                    vllm = init_vllm_from_path(model_path=str(ckpt_dir), seed=42, gpu_memory_utilization=0.5)
                     try:
                         evaluate_sft_model(eval_config, vllm, eval_step=cur_step)
                     finally:
