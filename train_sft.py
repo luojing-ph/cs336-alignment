@@ -358,25 +358,6 @@ def train_sft_model(
                 cur_step += 1
 
                 if (cur_step + 1) % train_config.log_print_steps == 0 and evaluate:
-                    '''
-                    load_model_into_vllm_instance(model, vllm)
-                    log_generate(
-                        vllm,
-                        reward_fn=r1_zero_reward_fn,
-                        prompts=dataset.train_prompts,
-                        cot=dataset.train_cot,
-                        answers=dataset.train_answers,
-                        eval_sampling_params=SamplingParams(
-                            temperature=eval_config.temperature,
-                            top_p=eval_config.top_p,
-                            max_tokens=eval_config.max_tokens,
-                            stop=["</answer>"],
-                            include_stop_str_in_output=True,
-                        ),
-                        cur_step=cur_step,
-                        num_example=3,
-                    )
-                    '''
                     # Save checkpoint
                     model.eval()
                     ckpt_dir = save_model_and_tokenizer(model, tokenizer, train_config)
