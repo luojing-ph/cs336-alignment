@@ -58,3 +58,40 @@ def compute_grpo_clip_loss(
 
     metadata = {}
     return -torch.min(v, v_clip), metadata
+
+
+def compute_policy_gradient_loss(
+        policy_log_probs: torch.Tensor,
+        loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"],
+        raw_rewards: torch.Tensor | None = None,
+        advantages: torch.Tensor | None = None,
+        old_log_probs: torch.Tensor | None = None,
+        cliprange: float | None = None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    assert loss_type in ["no_baseline", "reinforce_with_baseline", "grpo_clip"], f"Unknown loss type {loss_type}"
+    B, T = policy_log_probs.shape
+
+    if loss_type == "no_baseline":
+        assert raw_rewards is not None, "raw_rewards must not be None for no_baseline"
+        assert raw_rewards.shape == (B, 1), f"Invalid shape for raw_rewards {raw_rewards.shape}"
+        loss = compute_naive_policy_gradient_loss(raw_rewards, policy_log_probs)
+        metadata: dict[str, torch.Tensor] = {"mean_raw_reward": torch.mean(raw_rewards).item()}
+        return loss, metadata
+    elif loss_type == "reinforce_with_baseline":
+        assert advantages is not None, "advantages must not be None for reinforce_with_baseline"
+        assert advantages.shape == (B, 1), f"Invalid shape for advantages {advantages.shape}"
+        loss = compute_naive_policy_gradient_loss(advantages, policy_log_probs)
+        metadata: dict[str, torch.Tensor] = {"mean_advantages": torch.mean(advantages).item()}
+        return loss, metadata
+
+    # loss type == grpo_clip
+    assert advantages is not None, "advantages must not be None for grpo_clip"
+    assert old_log_probs is not None, "old_log_probs must not be None for grpo_clip"
+    assert cliprange is not None, "cliprange must not be None for grpo_clip"
+    assert advantages.shape == (B, 1), f"Invalid shape for advantages {advantages.shape}"
+    assert old_log_probs.shape == (B, T), f"Invalid shape for old_log_probs {old_log_probs.shape}"
+    assert cliprange > 0, "cliprange must be > 0"
+
+    loss, metadata = compute_grpo_clip_loss(advantages, policy_log_probs, old_log_probs, cliprange)
+
+    return loss, metadata
