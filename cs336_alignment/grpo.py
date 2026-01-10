@@ -95,3 +95,8 @@ def compute_policy_gradient_loss(
     loss, metadata = compute_grpo_clip_loss(advantages, policy_log_probs, old_log_probs, cliprange)
 
     return loss, metadata
+
+
+def masked_mean(tensor: torch.Tensor, mask: torch.Tensor, dim: int | None = None) -> torch.Tensor:
+    masked_tensor = tensor * mask
+    return torch.sum(masked_tensor, dim=dim) / torch.sum(mask, dim=dim)
