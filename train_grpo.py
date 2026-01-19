@@ -34,7 +34,10 @@ from vllm import LLM, SamplingParams
 
 from cs336_alignment.data_utils import load_and_format_prompts
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
-from cs336_alignment.grpo import compute_group_normalized_rewards, grpo_microbatch_train_step
+from cs336_alignment.grpo import (
+    compute_group_normalized_rewards,
+    grpo_microbatch_train_step,
+)
 from cs336_alignment.sft_utils import get_response_log_probs, tokenize_prompt_and_output
 from cs336_alignment.utils import (
     get_run_name,
@@ -143,11 +146,15 @@ class TrainConfig:
 
     def __post_init__(self):
         total_data_points = (
-                self.n_train_epochs_per_rollout_batch * self.question_per_grpo_step * self.group_size
+            self.n_train_epochs_per_rollout_batch
+            * self.question_per_grpo_step
+            * self.group_size
         )
         effective_batch = self.micro_batch_size * self.gradient_accumulation_steps
         # number of optimizer steps to cover the rollout dataset once per epoch
-        self.n_train_steps_per_rollout_batch = max(1, total_data_points // effective_batch)
+        self.n_train_steps_per_rollout_batch = max(
+            1, total_data_points // effective_batch
+        )
 
 
 @dataclass
@@ -186,10 +193,10 @@ class GRPODataset(Dataset):
 # ----------------------------
 @torch.no_grad()
 def get_old_log_probs(
-        model,
-        input_ids: torch.Tensor,  # shape: [Q * G, T]
-        labels: torch.Tensor,  # shape: [Q * G, T]
-        train_config: TrainConfig,
+    model,
+    input_ids: torch.Tensor,  # shape: [Q * G, T]
+    labels: torch.Tensor,  # shape: [Q * G, T]
+    train_config: TrainConfig,
 ) -> tuple[list[list[float]], list[list[float]]]:
     """
     Computes token-level log-probabilities under the old policy (pi_old).
@@ -252,14 +259,14 @@ def get_old_log_probs(
 # ----------------------------
 class GRPORolloutDataset(Dataset):
     def __init__(
-            self,
-            model,
-            prompts,
-            responses,
-            raw_rewards: torch.Tensor,
-            advantages: torch.Tensor,
-            train_config: TrainConfig,
-            tokenizer,
+        self,
+        model,
+        prompts,
+        responses,
+        raw_rewards: torch.Tensor,
+        advantages: torch.Tensor,
+        train_config: TrainConfig,
+        tokenizer,
     ):
         # Store rewards/advantages on CPU
         self.raw_rewards = raw_rewards.cpu()
@@ -274,7 +281,9 @@ class GRPORolloutDataset(Dataset):
         self.old_log_probs, self.token_entropy = get_old_log_probs(
             model, self.input_ids, self.labels, train_config
         )
-        self.old_log_probs = torch.tensor(self.old_log_probs, dtype=torch.float32)  # [N, T]
+        self.old_log_probs = torch.tensor(
+            self.old_log_probs, dtype=torch.float32
+        )  # [N, T]
 
     def __len__(self):
         return len(self.input_ids)
@@ -284,7 +293,9 @@ class GRPORolloutDataset(Dataset):
         labels = self.labels[idx]
         response_mask = self.response_mask[idx]
         raw_reward = self.raw_rewards[idx]
-        advantage = self.advantages[idx].unsqueeze(-1)  # shape [1] -> [1,1] style broadcasting
+        advantage = self.advantages[idx].unsqueeze(
+            -1
+        )  # shape [1] -> [1,1] style broadcasting
         old_log_probs = self.old_log_probs[idx]
         return input_ids, labels, response_mask, raw_reward, advantage, old_log_probs
 
@@ -293,15 +304,15 @@ class GRPORolloutDataset(Dataset):
 # Policy update (GRPO clip) on one rollout batch
 # ----------------------------
 def update_policy_on_rollouts(
-        model,
-        optimizer,
-        tokenizer,
-        train_config: TrainConfig,
-        prompts,
-        responses,
-        raw_rewards: torch.Tensor,
-        advantages: torch.Tensor,
-        global_step: int,
+    model,
+    optimizer,
+    tokenizer,
+    train_config: TrainConfig,
+    prompts,
+    responses,
+    raw_rewards: torch.Tensor,
+    advantages: torch.Tensor,
+    global_step: int,
 ):
     # Build dataset; no need for grad in dataset creation
     with torch.no_grad():
@@ -343,7 +354,9 @@ def update_policy_on_rollouts(
 
     while opt_steps < train_config.n_train_steps_per_rollout_batch:
         batch = next(cycled)
-        input_ids, labels, response_mask, raw_rewards_b, advantages_b, old_log_probs = batch
+        input_ids, labels, response_mask, raw_rewards_b, advantages_b, old_log_probs = (
+            batch
+        )
 
         if advantages_b.ndim == 1:
             advantages_b = advantages_b[:, None]
@@ -355,7 +368,9 @@ def update_policy_on_rollouts(
         old_log_probs = old_log_probs.to(train_config.device)
 
         with ctx:
-            out = get_response_log_probs(model=model, input_ids=input_ids, labels=labels)
+            out = get_response_log_probs(
+                model=model, input_ids=input_ids, labels=labels
+            )
             policy_log_probs = out["log_probs"]
 
             loss, metadata = grpo_microbatch_train_step(
@@ -375,7 +390,16 @@ def update_policy_on_rollouts(
         kl_denom_acc += float(metadata["kl_denom"])
         micro += 1
 
-        del input_ids, labels, response_mask, raw_rewards_b, advantages_b, old_log_probs, out, policy_log_probs
+        del (
+            input_ids,
+            labels,
+            response_mask,
+            raw_rewards_b,
+            advantages_b,
+            old_log_probs,
+            out,
+            policy_log_probs,
+        )
         clear()
 
         if micro % train_config.gradient_accumulation_steps == 0:
@@ -390,16 +414,20 @@ def update_policy_on_rollouts(
             approx_kl_ppo_step = approx_kl_ppo_acc / max(1.0, kl_denom_acc)
             step_loss = batch_loss_accum  # already scaled inside microbatch step
 
-            print(f"[update] opt_step={opt_steps}/{train_config.n_train_steps_per_rollout_batch} "
-                  f"global_step={global_step_} loss={step_loss:.6f}"
-                  f" approx_kl={approx_kl_step:.8f} approx_kl_ppo={approx_kl_ppo_step:.8f} ")
+            print(
+                f"[update] opt_step={opt_steps}/{train_config.n_train_steps_per_rollout_batch} "
+                f"global_step={global_step_} loss={step_loss:.6f}"
+                f" approx_kl={approx_kl_step:.8f} approx_kl_ppo={approx_kl_ppo_step:.8f} "
+            )
 
-            wandb.log({
-                "train/loss": step_loss,
-                "train/approx_kl": approx_kl_step,
-                "train/approx_kl_ppo": approx_kl_ppo_step,
-                "train_step": global_step_,
-            })
+            wandb.log(
+                {
+                    "train/loss": step_loss,
+                    "train/approx_kl": approx_kl_step,
+                    "train/approx_kl_ppo": approx_kl_ppo_step,
+                    "train_step": global_step_,
+                }
+            )
 
             batch_loss_accum = 0.0
             approx_kl_acc = 0.0
@@ -413,12 +441,12 @@ def update_policy_on_rollouts(
 # Main GRPO training loop (single GPU)
 # ----------------------------
 def train_grpo_single_gpu(
-        train_config: TrainConfig,
-        eval_config: EvaluateConfig,
-        train_prompts,
-        train_cot,
-        train_answers,
-        seed: int,
+    train_config: TrainConfig,
+    eval_config: EvaluateConfig,
+    train_prompts,
+    train_cot,
+    train_answers,
+    seed: int,
 ):
     wandb.init(
         entity=os.getenv("WANDB_ENTITY"),
@@ -441,7 +469,9 @@ def train_grpo_single_gpu(
     tokenizer = AutoTokenizer.from_pretrained(train_config.model_name)
 
     move_model_to_gpu(model, train_config.device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=train_config.learning_rate, betas=train_config.betas)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=train_config.learning_rate, betas=train_config.betas
+    )
 
     # Base question sampling loader
     base_ds = GRPODataset(train_prompts, train_cot, train_answers)
@@ -497,7 +527,9 @@ def train_grpo_single_gpu(
         )
 
         # sample group_size responses per prompt
-        print(f"[rollout] step={grpo_step} sampling {train_config.group_size} per prompt...")
+        print(
+            f"[rollout] step={grpo_step} sampling {train_config.group_size} per prompt..."
+        )
         all_gens = vllm.generate(sample_prompts, grpo_sp)
 
         all_prompts = []
@@ -592,11 +624,11 @@ def train_grpo_single_gpu(
 
 
 def main(
-        *,
-        model_name: str = "Qwen/Qwen2.5-Math-1.5B",
-        data_path: str = "./data/gsm8k/train.jsonl",
-        prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt",
-        seed: int = 123,
+    *,
+    model_name: str = "Qwen/Qwen2.5-Math-1.5B",
+    data_path: str = "./data/gsm8k/train.jsonl",
+    prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt",
+    seed: int = 123,
 ):
     dotenv.load_dotenv()
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -618,12 +650,16 @@ def main(
     train_config.prompt_path = prompt_path
     eval_config.prompt_path = prompt_path
 
-    prompts, cot, answers = load_and_format_prompts(train_config.data_path, train_config.prompt_path)
+    prompts, cot, answers = load_and_format_prompts(
+        train_config.data_path, train_config.prompt_path
+    )
 
     train_config.num_example = len(prompts)
     train_config.experiment_name = f"grpo_single_gpu_{train_config.num_example}"
 
-    print_rich_dict({"train config": asdict(train_config), "eval config": asdict(eval_config)})
+    print_rich_dict(
+        {"train config": asdict(train_config), "eval config": asdict(eval_config)}
+    )
 
     train_grpo_single_gpu(
         train_config=train_config,
