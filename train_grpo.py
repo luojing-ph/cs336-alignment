@@ -187,40 +187,63 @@ class GRPODataset(Dataset):
 @torch.no_grad()
 def get_old_log_probs(
         model,
-        input_ids: torch.Tensor,
-        labels: torch.Tensor,
+        input_ids: torch.Tensor,  # shape: [Q * G, T]
+        labels: torch.Tensor,  # shape: [Q * G, T]
         train_config: TrainConfig,
-):
-    was_training = model.training
+) -> tuple[list[list[float]], list[list[float]]]:
+    """
+    Computes token-level log-probabilities under the old policy (pi_old).
+
+    Returns:
+        log_probs:      list length (Q * G), each element is List[float] of length T
+        token_entropy: list length (Q * G), each element is List[float] of length T
+    """
+
+    # Save and force eval mode (important for PPO stability)
+    was_training: bool = model.training
     model.eval()
 
-    log_probs = []
-    token_entropy = []
+    log_probs: list[list[float]] = []
+    token_entropy: list[list[float]] = []
 
-    input_ids = input_ids.to(train_config.device)
-    labels = labels.to(train_config.device)
+    # Move rollout tensors to device
+    input_ids = input_ids.to(train_config.device)  # [Q*G, T]
+    labels = labels.to(train_config.device)  # [Q*G, T]
 
-    # compute in chunks of group_size to limit memory
-    num_questions = train_config.question_per_grpo_step
+    # Number of prompts and group size
+    Q = train_config.question_per_grpo_step
     G = train_config.group_size
-    for q_i in trange(num_questions, desc="old_log_probs"):
+
+    # Loop over questions (not responses!)
+    for q_i in trange(Q, desc="old_log_probs"):
         start = q_i * G
-        input_part = input_ids[start: start + G]
-        labels_part = labels[start: start + G]
+        end = start + G
+
+        # Slice one question's group
+        input_part = input_ids[start:end]  # [G, T]
+        labels_part = labels[start:end]  # [G, T]
 
         out = get_response_log_probs(
             model=model,
-            input_ids=input_part,
-            labels=labels_part,
+            input_ids=input_part,  # [G, T]
+            labels=labels_part,  # [G, T]
             return_token_entropy=True,
         )
-        log_probs.extend(out["log_probs"].tolist())
-        token_entropy.extend(out["token_entropy"].tolist())
+        # out["log_probs"]      : Tensor [G, T]
+        # out["token_entropy"]  : Tensor [G, T]
+
+        log_probs.extend(out["log_probs"].tolist())  # adds G lists of length T
+        token_entropy.extend(out["token_entropy"].tolist())  # adds G lists of length T
 
         del out, input_part, labels_part
         clear()
 
+    # Restore original training state
     model.train(was_training)
+
+    # Final shapes:
+    #   log_probs      : List length (Q*G), each element List[T]
+    #   token_entropy  : List length (Q*G), each element List[T]
     return log_probs, token_entropy
 
 
@@ -251,6 +274,7 @@ class GRPORolloutDataset(Dataset):
         self.old_log_probs, self.token_entropy = get_old_log_probs(
             model, self.input_ids, self.labels, train_config
         )
+        self.old_log_probs = torch.tensor(self.old_log_probs, dtype=torch.float32)  # [N, T]
 
     def __len__(self):
         return len(self.input_ids)
@@ -261,7 +285,7 @@ class GRPORolloutDataset(Dataset):
         response_mask = self.response_mask[idx]
         raw_reward = self.raw_rewards[idx]
         advantage = self.advantages[idx].unsqueeze(-1)  # shape [1] -> [1,1] style broadcasting
-        old_log_probs = torch.tensor(self.old_log_probs[idx], dtype=torch.float32)
+        old_log_probs = self.old_log_probs[idx]
         return input_ids, labels, response_mask, raw_reward, advantage, old_log_probs
 
 
@@ -312,12 +336,17 @@ def update_policy_on_rollouts(
     micro = 0
     opt_steps = 0
     batch_loss_accum = 0.0
+    approx_kl_acc = 0.0
+    approx_kl_ppo_acc = 0.0
+    kl_denom_acc = 0
     global_step_ = global_step
 
     while opt_steps < train_config.n_train_steps_per_rollout_batch:
         batch = next(cycled)
         input_ids, labels, response_mask, raw_rewards_b, advantages_b, old_log_probs = batch
 
+        if advantages_b.ndim == 1:
+            advantages_b = advantages_b[:, None]
         input_ids = input_ids.to(train_config.device)
         labels = labels.to(train_config.device)
         response_mask = response_mask.to(train_config.device)
@@ -341,6 +370,9 @@ def update_policy_on_rollouts(
             )
 
         batch_loss_accum += float(loss.detach().cpu())
+        approx_kl_acc += float(metadata["approx_kl"].cpu())
+        approx_kl_ppo_acc += float(metadata["approx_kl_ppo"].cpu())
+        kl_denom_acc += float(metadata["kl_denom"])
         micro += 1
 
         del input_ids, labels, response_mask, raw_rewards_b, advantages_b, old_log_probs, out, policy_log_probs
@@ -353,12 +385,26 @@ def update_policy_on_rollouts(
 
             opt_steps += 1
             global_step_ += 1
-            avg_loss = batch_loss_accum  # already scaled inside microbatch step
+
+            approx_kl_step = approx_kl_acc / max(1.0, kl_denom_acc)
+            approx_kl_ppo_step = approx_kl_ppo_acc / max(1.0, kl_denom_acc)
+            step_loss = batch_loss_accum  # already scaled inside microbatch step
+
             print(f"[update] opt_step={opt_steps}/{train_config.n_train_steps_per_rollout_batch} "
-                  f"global_step={global_step_} loss={avg_loss:.4f}")
-            wandb.log({"train/loss": avg_loss, "train_step": global_step_})
+                  f"global_step={global_step_} loss={step_loss:.6f}"
+                  f" approx_kl={approx_kl_step:.8f} approx_kl_ppo={approx_kl_ppo_step:.8f} ")
+
+            wandb.log({
+                "train/loss": step_loss,
+                "train/approx_kl": approx_kl_step,
+                "train/approx_kl_ppo": approx_kl_ppo_step,
+                "train_step": global_step_,
+            })
 
             batch_loss_accum = 0.0
+            approx_kl_acc = 0.0
+            approx_kl_ppo_acc = 0.0
+            kl_denom_acc = 0.0
 
     return global_step_
 

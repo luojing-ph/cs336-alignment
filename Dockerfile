@@ -8,5 +8,6 @@ WORKDIR /app
 COPY . /app
 
 RUN pip install fire latex2sympy2_extended math_verify
+RUN pip install --upgrade wandb
 
 WORKDIR /app

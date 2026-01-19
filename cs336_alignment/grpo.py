@@ -50,15 +50,31 @@ def compute_naive_policy_gradient_loss(
 
 
 def compute_grpo_clip_loss(
-        advantages: torch.Tensor, policy_log_probs: torch.Tensor, old_log_probs: torch.Tensor, cliprange: float
+        advantages: torch.Tensor,  # [B, 1]
+        policy_log_probs: torch.Tensor,  # [B, T]
+        old_log_probs: torch.Tensor,  # [B, T]
+        cliprange: float,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    pi_ratio = torch.exp(policy_log_probs - old_log_probs)
-    _, seq_len = policy_log_probs.shape
-    v = advantages * pi_ratio
-    v_clip = torch.clip(pi_ratio, min=1 - cliprange, max=1 + cliprange) * advantages
+    advantages = advantages.detach()
 
-    metadata = {}
-    return -torch.min(v, v_clip), metadata
+    pi_ratio = torch.exp(policy_log_probs - old_log_probs)
+    pi_ratio_clip = pi_ratio.clamp(1 - cliprange, 1 + cliprange)
+    v = advantages * pi_ratio
+    v_clip = advantages * pi_ratio_clip
+    loss = - torch.min(v, v_clip)
+
+    with torch.no_grad():
+        clip_frac = (pi_ratio != pi_ratio_clip).float().mean()
+        approx_kl = (old_log_probs - policy_log_probs).mean()
+        metadata = {
+            "ratio_mean": pi_ratio.mean(),
+            "ratio_min": pi_ratio.min().detach(),
+            "ratio_max": pi_ratio.max().detach(),
+            "clip_frac": clip_frac,
+            # "approx_kl": approx_kl,  # proxy
+        }
+
+    return loss, metadata
 
 
 def compute_policy_gradient_loss(
@@ -112,7 +128,7 @@ def grpo_microbatch_train_step(
         advantages: torch.Tensor | None = None,
         old_log_probs: torch.Tensor | None = None,
         cliprange: float | None = None,
-) -> tuple[float, dict[str, torch.Tensor]]:
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     loss, metadata = compute_policy_gradient_loss(
         policy_log_probs=policy_log_probs,
         loss_type=loss_type,
@@ -121,6 +137,16 @@ def grpo_microbatch_train_step(
         old_log_probs=old_log_probs,
         cliprange=cliprange,
     )
+    with torch.no_grad():
+        denom = response_mask.sum().clamp_min(1)
+        metadata['kl_denom'] = denom.item()
+        approx_kl = ((old_log_probs - policy_log_probs) * response_mask).sum() / denom
+        metadata['approx_kl'] = approx_kl.detach()
+        # PPO-style approximate KL
+        log_ratio = policy_log_probs - old_log_probs
+        ratio = torch.exp(log_ratio)
+        approx_kl_ppo = ((ratio - 1 - log_ratio) * response_mask).sum() / denom
+        metadata['approx_kl_ppo'] = approx_kl_ppo.detach()
 
     loss = masked_mean(loss, response_mask)
     loss = loss / gradient_accumulation_steps
