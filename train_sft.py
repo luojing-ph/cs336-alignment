@@ -28,7 +28,11 @@ from cs336_alignment.utils import (
     print_rich_dict,
     save_model_and_tokenizer,
 )
-from cs336_alignment.vllm_utils import init_vllm, load_model_into_vllm_instance, init_vllm_from_path
+from cs336_alignment.vllm_utils import (
+    init_vllm,
+    load_model_into_vllm_instance,
+    init_vllm_from_path,
+)
 
 logging.getLogger("vllm").setLevel(logging.WARNING)
 
@@ -128,14 +132,14 @@ def get_lr(it, max_lr, max_steps):
 
 
 def log_generate(
-        vllm_model: LLM,
-        reward_fn: Callable[[str, str], dict[str, float]],
-        prompts: List[str],
-        cot: List[str],
-        answers: List[str],
-        eval_sampling_params: SamplingParams,
-        cur_step: int,
-        num_example=2,
+    vllm_model: LLM,
+    reward_fn: Callable[[str, str], dict[str, float]],
+    prompts: List[str],
+    cot: List[str],
+    answers: List[str],
+    eval_sampling_params: SamplingParams,
+    cur_step: int,
+    num_example=2,
 ):
     random_indices = random.sample(range(len(prompts)), k=num_example)
     sampled_prompts = [prompts[i] for i in random_indices]
@@ -169,16 +173,18 @@ def log_generate(
 
 
 def run_vllm_logging_from_checkpoint(
-        *,
-        ckpt_dir: str,
-        seed: int,
-        eval_config: EvaluateConfig,
-        dataset: SFTDataset,
-        cur_step: int,
-        num_example: int = 3,
+    *,
+    ckpt_dir: str,
+    seed: int,
+    eval_config: EvaluateConfig,
+    dataset: SFTDataset,
+    cur_step: int,
+    num_example: int = 3,
 ):
     # Create vLLM just for this evaluation
-    vllm = init_vllm_from_path(model_path=str(ckpt_dir), seed=seed, gpu_memory_utilization=0.5)
+    vllm = init_vllm_from_path(
+        model_path=str(ckpt_dir), seed=seed, gpu_memory_utilization=0.5
+    )
 
     try:
         sp = SamplingParams(
@@ -204,23 +210,29 @@ def run_vllm_logging_from_checkpoint(
         torch.cuda.empty_cache()
 
 
-def evaluate_vllm(
-        vllm_model: LLM,
-        reward_fn: Callable[[str, str], dict[str, float]],
-        prompts: List[str],
-        answers: List[str],
-        eval_sampling_params: SamplingParams,
-):
-    responses = get_response(vllm_model, prompts, eval_sampling_params)
-    allinfo_dict_list = []
-    for response, answer in zip(responses, answers):
-        # extracted_answer = extract_reference_answer(response)
-        reward_dict = reward_fn(response, answer)
-        allinfo_dict_list.append(reward_dict)
+def evaluate_responses(
+    reward_fn: Callable[[str, str], dict[str, float]],
+    responses: List[str],
+    answers: List[str],
+) -> dict[str, int]:
+    """Pure scoring: no vLLM usage, no generation."""
+    overview = {
+        "correct": 0,
+        "format_wrong": 0,
+        "format_correct": 0,
+        "answer_wrong": 0,
+        "count": 0,
+    }
 
-    overview = {"correct": 0, "format_wrong": 0, "format_correct": 0, "answer_wrong": 0, "count": 0}
-    for reward in allinfo_dict_list:
+    # If lengths mismatch, zip will silently truncate; assert helps catch bugs early.
+    assert len(responses) == len(
+        answers
+    ), f"len(responses)={len(responses)} != len(answers)={len(answers)}"
+
+    for response, answer in zip(responses, answers):
+        reward = reward_fn(response, answer)
         overview["count"] += 1
+
         if reward["reward"] == 1:
             overview["correct"] += 1
             overview["format_correct"] += 1
@@ -233,8 +245,25 @@ def evaluate_vllm(
     return overview
 
 
+def evaluate_vllm(
+    vllm_model: LLM,
+    reward_fn: Callable[[str, str], dict[str, float]],
+    prompts: List[str],
+    answers: List[str],
+    eval_sampling_params: SamplingParams,
+):
+    responses = get_response(vllm_model, prompts, eval_sampling_params)
+    return evaluate_responses(
+        reward_fn=reward_fn,
+        responses=responses,
+        answers=answers,
+    )
+
+
 def evaluate_sft_model(config: EvaluateConfig, vllm: LLM, eval_step: int):
-    prompts, cot, answers = load_and_format_prompts(config.data_path, config.prompt_path)
+    prompts, cot, answers = load_and_format_prompts(
+        config.data_path, config.prompt_path
+    )
 
     sampling_params = SamplingParams(
         temperature=config.temperature,
@@ -253,21 +282,22 @@ def evaluate_sft_model(config: EvaluateConfig, vllm: LLM, eval_step: int):
             "eval/format_wrong": results["format_wrong"],
             "eval/accuracy": results["correct"] / results["count"],
             "eval/format_accuracy": results["format_correct"] / results["count"],
-            "eval/correct_answer_out_of_correct_format": results["correct"] / results["format_correct"],
+            "eval/correct_answer_out_of_correct_format": results["correct"]
+            / results["format_correct"],
             "eval_step": eval_step,
         }
     )
 
 
 def train_sft_model(
-        model,
-        tokenizer,
-        train_config: TrainConfig,
-        eval_config: EvaluateConfig,
-        train_prompts,
-        train_cot,
-        train_answers,
-        evaluate: bool = True,
+    model,
+    tokenizer,
+    train_config: TrainConfig,
+    eval_config: EvaluateConfig,
+    train_prompts,
+    train_cot,
+    train_answers,
+    evaluate: bool = True,
 ):
     wandb.init(
         entity=os.getenv("WANDB_ENTITY"),
@@ -309,7 +339,9 @@ def train_sft_model(
     # ---------------------
     # Optimizer
     # ---------------------
-    optimizer = torch.optim.AdamW(model.parameters(), lr=train_config.learning_rate, betas=train_config.betas)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=train_config.learning_rate, betas=train_config.betas
+    )
     print("[train] Optimizer initialized")
 
     # ---------------------
@@ -321,12 +353,18 @@ def train_sft_model(
     while True:
         for i, data in enumerate(dataloader):
             total_micro_steps += 1
-            input_ids = data["input_ids"].to(train_config.train_device, non_blocking=True)
+            input_ids = data["input_ids"].to(
+                train_config.train_device, non_blocking=True
+            )
             labels = data["labels"].to(train_config.train_device, non_blocking=True)
-            response_mask = data["response_mask"].to(train_config.train_device, non_blocking=True)
+            response_mask = data["response_mask"].to(
+                train_config.train_device, non_blocking=True
+            )
 
             with ctx:
-                log_prob = get_response_log_probs(model=model, input_ids=input_ids, labels=labels)
+                log_prob = get_response_log_probs(
+                    model=model, input_ids=input_ids, labels=labels
+                )
                 log_prob = log_prob["log_probs"]
                 loss, _ = sft_microbatch_train_step(
                     log_prob, response_mask, train_config.gradient_accumulation_steps
@@ -335,7 +373,9 @@ def train_sft_model(
             batch_loss += loss
             if total_micro_steps % train_config.gradient_accumulation_steps == 0:
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                adj_lr = get_lr(cur_step, train_config.learning_rate, train_config.training_steps)
+                adj_lr = get_lr(
+                    cur_step, train_config.learning_rate, train_config.training_steps
+                )
                 for param_group in optimizer.param_groups:
                     param_group["lr"] = adj_lr
 
@@ -391,7 +431,9 @@ def train_sft_model(
                     model.to("cpu")
                     torch.cuda.empty_cache()
 
-                    vllm = init_vllm_from_path(model_path=str(ckpt_dir), seed=42, gpu_memory_utilization=0.5)
+                    vllm = init_vllm_from_path(
+                        model_path=str(ckpt_dir), seed=42, gpu_memory_utilization=0.5
+                    )
                     try:
                         evaluate_sft_model(eval_config, vllm, eval_step=cur_step)
                     finally:
@@ -414,14 +456,14 @@ def train_sft_model(
 
 
 def main(
-        *,
-        model_name: str = "Qwen/Qwen2.5-Math-1.5B",
-        data_path: str = "./data/gsm8k/train.jsonl",
-        prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt",
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-        max_tokens: int = 256,
-        seed: int = 42,
+    *,
+    model_name: str = "Qwen/Qwen2.5-Math-1.5B",
+    data_path: str = "./data/gsm8k/train.jsonl",
+    prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt",
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    max_tokens: int = 256,
+    seed: int = 42,
 ):
     dotenv.load_dotenv()
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -436,7 +478,9 @@ def main(
     api_key = os.getenv("WANDB_API_KEY")
     wandb.login(key=api_key)
 
-    prompts, cot, answers = load_and_format_prompts(train_config.data_path, train_config.prompt_path)
+    prompts, cot, answers = load_and_format_prompts(
+        train_config.data_path, train_config.prompt_path
+    )
 
     for num_samples in [len(prompts)]:
         # ---------------------
@@ -450,7 +494,9 @@ def main(
         ).to(train_config.train_device)
         tokenizer = AutoTokenizer.from_pretrained(train_config.model_name)
         print(f"[train] Tokenizer {train_config.model_name} loaded")
-        print(f"[train] Model {train_config.model_name} loaded on {train_config.train_device}")
+        print(
+            f"[train] Model {train_config.model_name} loaded on {train_config.train_device}"
+        )
 
         train_config.num_example = num_samples
 

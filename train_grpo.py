@@ -21,6 +21,7 @@ import math
 import os
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
+from typing import Callable, List
 
 import dotenv
 import fire
@@ -46,7 +47,7 @@ from cs336_alignment.utils import (
     save_model_and_tokenizer,
 )
 from cs336_alignment.vllm_utils import init_vllm_from_path
-from train_sft import evaluate_vllm
+from train_sft import evaluate_responses
 
 logging.getLogger("vllm").setLevel(logging.WARNING)
 
@@ -437,6 +438,98 @@ def update_policy_on_rollouts(
     return global_step_
 
 
+def generate_with_vllm_single_gpu_swap(
+    *,
+    model: torch.nn.Module,
+    tokenizer,
+    optimizer,
+    train_config,
+    prompts: List[str],
+    answers: List[str] | None,
+    sampling_params: SamplingParams,
+    seed: int,
+    gpu_memory_utilization: float,
+    flatten_outputs: bool = True,
+) -> tuple[list[str], list[str], list[str] | None]:
+    """
+    Single-GPU pattern:
+      - save HF checkpoint
+      - move HF model + optimizer off GPU
+      - start vLLM (uses GPU)
+      - generate
+      - shutdown vLLM
+      - move HF model + optimizer back to GPU
+
+    Returns:
+      flattened_prompts, flattened_responses, flattened_answers (or None)
+    """
+    # --- save checkpoint (HF must be in eval)
+    model.eval()
+    ckpt_dir = save_model_and_tokenizer(model, tokenizer, train_config)
+
+    # --- free VRAM so vLLM can start
+    if optimizer is not None:
+        # if you have these helpers, use them; otherwise ignore
+        try:
+            from cs336_alignment.utils import move_optimizer_to_cpu
+
+            move_optimizer_to_cpu(optimizer)
+        except Exception:
+            pass
+
+    model.to("cpu")
+    clear()
+
+    vllm = init_vllm_from_path(
+        model_path=str(ckpt_dir),
+        seed=seed,
+        gpu_memory_utilization=gpu_memory_utilization,
+    )
+
+    try:
+        # vLLM returns List[RequestOutput] (one per prompt)
+        req_outputs = vllm.generate(prompts, sampling_params)
+
+        if not flatten_outputs:
+            # In case you ever want structured outputs later:
+            # return prompts, [req.outputs[0].text for req in req_outputs], answers
+            raise NotImplementedError(
+                "flatten_outputs=False not implemented in this helper."
+            )
+
+        flat_prompts: list[str] = []
+        flat_responses: list[str] = []
+        flat_answers: list[str] | None = [] if answers is not None else None
+
+        for i, req in enumerate(req_outputs):
+            p = prompts[i]
+            a = answers[i] if answers is not None else None
+            for out in req.outputs:
+                flat_prompts.append(p)
+                flat_responses.append(out.text)
+                if flat_answers is not None:
+                    flat_answers.append(a)
+
+        return flat_prompts, flat_responses, flat_answers
+
+    finally:
+        # Always shut down vLLM process + free VRAM
+        del vllm
+        clear()
+
+        # Move HF back to GPU for training/eval
+        model.to(train_config.device)
+        model.train()
+
+        if optimizer is not None:
+            try:
+                from cs336_alignment.utils import move_optimizer_to_gpu
+
+                move_optimizer_to_gpu(optimizer, train_config.device)
+            except Exception:
+                pass
+
+
 # ----------------------------
 # Main GRPO training loop (single GPU)
 # ----------------------------
@@ -511,44 +604,22 @@ def train_grpo_single_gpu(
         sample_prompts = list(sample_prompts)
         sample_answers = list(sample_answers)
 
-        # ---------------------------
-        # SINGLE GPU SWAP: HF -> CPU, vLLM -> GPU for rollouts
-        # ---------------------------
-        model.eval()
-        ckpt_dir = save_model_and_tokenizer(model, tokenizer, train_config)
-
-        move_optimizer_to_cpu(optimizer)
-        move_model_to_cpu(model)
-
-        vllm = init_vllm_from_path(
-            model_path=str(ckpt_dir),
-            seed=seed,
-            gpu_memory_utilization=train_config.vllm_gpu_memory_utilization,
-        )
-
         # sample group_size responses per prompt
         print(
             f"[rollout] step={grpo_step} sampling {train_config.group_size} per prompt..."
         )
-        all_gens = vllm.generate(sample_prompts, grpo_sp)
 
-        all_prompts = []
-        all_responses = []
-        all_answers = []
-        for q, a, gens in zip(sample_prompts, sample_answers, all_gens):
-            for o in gens.outputs:
-                all_prompts.append(q)
-                all_responses.append(o.text)
-                all_answers.append(a)
-
-        del vllm
-        clear()
-
-        # ---------------------------
-        # Swap back: HF -> GPU for advantages + old_log_probs + update
-        # ---------------------------
-        move_model_to_gpu(model, train_config.device)
-        move_optimizer_to_gpu(optimizer, train_config.device)
+        all_prompts, all_responses, all_answers = generate_with_vllm_single_gpu_swap(
+            model=model,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            train_config=train_config,
+            prompts=sample_prompts,
+            answers=sample_answers,
+            sampling_params=grpo_sp,
+            seed=seed,
+            gpu_memory_utilization=train_config.vllm_gpu_memory_utilization,
+        )
 
         # (2) compute rewards + group-normalized advantages
         advantages, raw_rewards, metadata = compute_group_normalized_rewards(
@@ -575,27 +646,27 @@ def train_grpo_single_gpu(
 
         # Periodic eval (same swap pattern)
         if (grpo_step + 1) % train_config.eval_steps == 0:
-            model.eval()
-            ckpt_dir = save_model_and_tokenizer(model, tokenizer, train_config)
+            eval_prompts, _, eval_answers = load_and_format_prompts(
+                eval_config.data_path, eval_config.prompt_path
+            )
 
-            move_optimizer_to_cpu(optimizer)
-            move_model_to_cpu(model)
-
-            vllm = init_vllm_from_path(
-                model_path=str(ckpt_dir),
+            # NOTE: eval_sp has n=1; flatten will return one response per prompt.
+            ep, er, ea = generate_with_vllm_single_gpu_swap(
+                model=model,
+                tokenizer=tokenizer,
+                optimizer=optimizer,
+                train_config=train_config,
+                prompts=list(eval_prompts),
+                answers=list(eval_answers),
+                sampling_params=eval_sp,
                 seed=seed,
                 gpu_memory_utilization=train_config.vllm_gpu_memory_utilization,
             )
 
-            eval_prompts, _, eval_answers = load_and_format_prompts(
-                eval_config.data_path, eval_config.prompt_path
-            )
-            results = evaluate_vllm(
-                vllm_model=vllm,
+            results = evaluate_responses(
                 reward_fn=r1_zero_reward_fn,
-                prompts=eval_prompts,
-                answers=eval_answers,
-                eval_sampling_params=eval_sp,
+                responses=er,
+                answers=ea,
             )
 
             wandb.log(
@@ -603,6 +674,7 @@ def train_grpo_single_gpu(
                     "eval/correct": results["correct"],
                     "eval/answer_wrong": results["answer_wrong"],
                     "eval/format_wrong": results["format_wrong"],
+                    "eval/format_correct": results["format_correct"],
                     "eval_step": grpo_step,
                 }
             )
