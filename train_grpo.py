@@ -471,8 +471,6 @@ def generate_with_vllm_single_gpu_swap(
     if optimizer is not None:
         # if you have these helpers, use them; otherwise ignore
         try:
-            from cs336_alignment.utils import move_optimizer_to_cpu
-
             move_optimizer_to_cpu(optimizer)
         except Exception:
             pass
@@ -523,8 +521,6 @@ def generate_with_vllm_single_gpu_swap(
 
         if optimizer is not None:
             try:
-                from cs336_alignment.utils import move_optimizer_to_gpu
-
                 move_optimizer_to_gpu(optimizer, train_config.device)
             except Exception:
                 pass
@@ -679,13 +675,6 @@ def train_grpo_single_gpu(
                 }
             )
             print(results)
-
-            del vllm
-            clear()
-
-            # back to training
-            move_model_to_gpu(model, train_config.device)
-            move_optimizer_to_gpu(optimizer, train_config.device)
 
         # Save each step (optional; comment out if slow)
         save_model_and_tokenizer(model, tokenizer, train_config)
