@@ -143,7 +143,7 @@ class TrainConfig:
     vllm_gpu_memory_utilization: float = 0.30  # lower if OOM
 
     # Eval
-    eval_steps: int = 5
+    eval_every_grpo_steps: int = 1
 
     def __post_init__(self):
         total_data_points = (
@@ -641,7 +641,7 @@ def train_grpo_single_gpu(
         )
 
         # Periodic eval (same swap pattern)
-        if (grpo_step + 1) % train_config.eval_steps == 0:
+        if (grpo_step + 1) % train_config.eval_every_grpo_steps == 0:
             eval_prompts, _, eval_answers = load_and_format_prompts(
                 eval_config.data_path, eval_config.prompt_path
             )
@@ -671,6 +671,13 @@ def train_grpo_single_gpu(
                     "eval/answer_wrong": results["answer_wrong"],
                     "eval/format_wrong": results["format_wrong"],
                     "eval/format_correct": results["format_correct"],
+                    "eval/correct_rate": results["correct_rate"],
+                    "eval/format_correct_rate": results["format_correct_rate"],
+                    "eval/answer_wrong_rate": results["answer_wrong_rate"],
+                    "eval/format_wrong_rate": results["format_wrong_rate"],
+                    "eval/correct_answer_out_of_correct_format": results[
+                        "correct_answer_out_of_correct_format"
+                    ],
                     "eval_step": grpo_step,
                 }
             )

@@ -214,9 +214,9 @@ def evaluate_responses(
     reward_fn: Callable[[str, str], dict[str, float]],
     responses: List[str],
     answers: List[str],
-) -> dict[str, int]:
+) -> dict[str, int | float]:
     """Pure scoring: no vLLM usage, no generation."""
-    overview = {
+    overview: dict[str, int | float] = {
         "correct": 0,
         "format_wrong": 0,
         "format_correct": 0,
@@ -241,6 +241,19 @@ def evaluate_responses(
             overview["answer_wrong"] += 1
         else:
             overview["format_wrong"] += 1
+
+    count = max(overview["count"], 1)  # guard against division by zero
+
+    overview.update(
+        {
+            "correct_rate": overview["correct"] / count,
+            "format_correct_rate": overview["format_correct"] / count,
+            "answer_wrong_rate": overview["answer_wrong"] / count,
+            "format_wrong_rate": overview["format_wrong"] / count,
+            "correct_answer_out_of_correct_format": overview["correct"]
+            / max(overview["format_correct"], 1),
+        }
+    )
 
     return overview
 
