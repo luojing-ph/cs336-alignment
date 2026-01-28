@@ -109,11 +109,11 @@ class TrainConfig:
 
     # Microbatch / grad accumulation
     micro_batch_size: int = 1
-    gradient_accumulation_steps: int = 32
+    gradient_accumulation_steps: int = 256
 
     # GRPO
-    n_grpo_steps: int = 20
-    question_per_grpo_step: int = 64
+    n_grpo_steps: int = 100
+    question_per_grpo_step: int = 32
     group_size: int = 8
 
     # How much to train on each rollout batch
@@ -135,12 +135,12 @@ class TrainConfig:
     # vLLM sampling
     temperature: float = 1.0
     top_p: float = 1.0
+    min_tokens: int = 4
     max_tokens: int = 1024
     stop_tokens: list[str] = field(default_factory=lambda: ["</answer>"])
     include_stop_str_in_output: bool = True
-    min_tokens: int = 4
     vllm_seed: int = 42
-    vllm_gpu_memory_utilization: float = 0.30  # lower if OOM
+    vllm_gpu_memory_utilization: float = 0.40  # lower if OOM
 
     # Eval
     eval_every_grpo_steps: int = 1
