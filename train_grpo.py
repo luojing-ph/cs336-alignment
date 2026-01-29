@@ -140,7 +140,7 @@ class TrainConfig:
     stop_tokens: list[str] = field(default_factory=lambda: ["</answer>"])
     include_stop_str_in_output: bool = True
     vllm_seed: int = 42
-    vllm_gpu_memory_utilization: float = 0.40  # lower if OOM
+    vllm_gpu_memory_utilization: float = 0.30  # lower if OOM
 
     # Eval
     eval_every_grpo_steps: int = 1
