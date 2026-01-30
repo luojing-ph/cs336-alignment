@@ -27,6 +27,7 @@ import dotenv
 import fire
 import torch
 import torch.nn as nn
+import numpy as np
 import wandb
 from torch.utils.data import DataLoader, Dataset
 from tqdm import trange
@@ -125,6 +126,7 @@ class TrainConfig:
 
     mixed_precision_training: bool = True
     learning_rate: float = 1e-5
+    # learning_rate: float = 1e-4
     betas: tuple[float, float] = (0.9, 0.95)
     cliprange: float = 0.2
     max_grad_norm: float = 1.0
@@ -420,12 +422,17 @@ def update_policy_on_rollouts(
                 f"global_step={global_step_} loss={step_loss:.6f}"
                 f" approx_kl={approx_kl_step:.8f} approx_kl_ppo={approx_kl_ppo_step:.8f} "
             )
-
+            token_entropy = torch.tensor(dataset.token_entropy).mean().item()
             wandb.log(
                 {
                     "train/loss": step_loss,
+                    "train/token_entropy": token_entropy,
                     "train/approx_kl": approx_kl_step,
                     "train/approx_kl_ppo": approx_kl_ppo_step,
+                    "train/pi_ratio_clip_frac": metadata["clip_frac"],
+                    "train/pi_ratio_mean": metadata["ratio_mean"],
+                    "train/pi_ratio_min": metadata["ratio_min"],
+                    "train/pi_ratio_max": metadata["ratio_max"],
                     "train_step": global_step_,
                 }
             )
@@ -545,8 +552,10 @@ def train_grpo_single_gpu(
     )
     wandb.define_metric("train_step")
     wandb.define_metric("eval_step")
+    wandb.define_metric("rollout_step")
     wandb.define_metric("train/*", step_metric="train_step")
     wandb.define_metric("eval/*", step_metric="eval_step")
+    wandb.define_metric("rollout/*", step_metric="rollout_step")
 
     # HF model + optimizer
     model = AutoModelForCausalLM.from_pretrained(
@@ -626,6 +635,20 @@ def train_grpo_single_gpu(
             advantage_eps=train_config.advantage_eps,
             normalized_by_std=train_config.use_std_normalization,
         )
+        lengths = [len(tokenizer(r).input_ids) for r in all_responses]
+
+        wandb.log(
+            {
+                "rollout/response_len_mean": np.mean(lengths),
+                "rollout/reward_mean": metadata["mean"],
+                "rollout/reward_std": metadata["std"],
+                "rollout/reward_max": metadata["max"],
+                "rollout/reward_min": metadata["min"],
+                "rollout/adv_mean": advantages.mean().item(),
+                "rollout/adv_std": advantages.std().item(),
+                "rollout_step": grpo_step,
+            }
+        )
 
         # (3) update policy on rollout batch (pi_old fixed via old_log_probs)
         global_step = update_policy_on_rollouts(
@@ -664,7 +687,11 @@ def train_grpo_single_gpu(
                 responses=er,
                 answers=ea,
             )
-
+            env_step = (
+                grpo_step
+                * train_config.question_per_grpo_step
+                * train_config.group_size
+            )
             wandb.log(
                 {
                     "eval/correct": results["correct"],
@@ -678,6 +705,7 @@ def train_grpo_single_gpu(
                     "eval/correct_answer_out_of_correct_format": results[
                         "correct_answer_out_of_correct_format"
                     ],
+                    "eval/env_step": env_step,
                     "eval_step": grpo_step,
                 }
             )
