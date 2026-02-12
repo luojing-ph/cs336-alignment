@@ -125,11 +125,12 @@ class TrainConfig:
     use_std_normalization: bool = True
 
     mixed_precision_training: bool = True
-    learning_rate: float = 1e-5
-    # learning_rate: float = 1e-4
+    learning_rate: float = 3e-5
     betas: tuple[float, float] = (0.9, 0.95)
     cliprange: float = 0.2
     max_grad_norm: float = 1.0
+    # loss types: grpo_clip, no_baseline, reinforce_with_baseline
+    loss_type: str = "grpo_clip"
 
     # Single GPU
     device: str = "cuda:0"
@@ -295,7 +296,7 @@ class GRPORolloutDataset(Dataset):
         input_ids = self.input_ids[idx]
         labels = self.labels[idx]
         response_mask = self.response_mask[idx]
-        raw_reward = self.raw_rewards[idx]
+        raw_reward = self.raw_rewards[idx].unsqueeze(-1)
         advantage = self.advantages[idx].unsqueeze(
             -1
         )  # shape [1] -> [1,1] style broadcasting
@@ -316,6 +317,7 @@ def update_policy_on_rollouts(
     raw_rewards: torch.Tensor,
     advantages: torch.Tensor,
     global_step: int,
+    loss_type: str,
 ):
     # Build dataset; no need for grad in dataset creation
     with torch.no_grad():
@@ -353,6 +355,8 @@ def update_policy_on_rollouts(
     approx_kl_acc = 0.0
     approx_kl_ppo_acc = 0.0
     kl_denom_acc = 0
+    mean_raw_reward_acc = 0  # for loss_type = no_baseline
+    mean_advantages_acc = 0  # for loss_type = reinforce_with_baseline
     global_step_ = global_step
 
     while opt_steps < train_config.n_train_steps_per_rollout_batch:
@@ -363,6 +367,8 @@ def update_policy_on_rollouts(
 
         if advantages_b.ndim == 1:
             advantages_b = advantages_b[:, None]
+        if raw_rewards_b.ndim == 1:
+            raw_rewards_b = raw_rewards_b[:, None]
         input_ids = input_ids.to(train_config.device)
         labels = labels.to(train_config.device)
         response_mask = response_mask.to(train_config.device)
@@ -380,7 +386,7 @@ def update_policy_on_rollouts(
                 policy_log_probs=policy_log_probs,
                 response_mask=response_mask,
                 gradient_accumulation_steps=train_config.gradient_accumulation_steps,
-                loss_type="grpo_clip",
+                loss_type=loss_type,
                 raw_rewards=raw_rewards_b,
                 advantages=advantages_b,
                 old_log_probs=old_log_probs,
@@ -391,6 +397,10 @@ def update_policy_on_rollouts(
         approx_kl_acc += float(metadata["approx_kl"].cpu())
         approx_kl_ppo_acc += float(metadata["approx_kl_ppo"].cpu())
         kl_denom_acc += float(metadata["kl_denom"])
+        if metadata.get("raw_rewards", None) is not None:
+            mean_raw_reward_acc += float(metadata["mean_raw_rewards"])
+        if metadata.get("mean_advantages", None) is not None:
+            mean_advantages_acc += float(metadata["mean_advantages"])
         micro += 1
 
         del (
@@ -416,6 +426,12 @@ def update_policy_on_rollouts(
             approx_kl_step = approx_kl_acc / max(1.0, kl_denom_acc)
             approx_kl_ppo_step = approx_kl_ppo_acc / max(1.0, kl_denom_acc)
             step_loss = batch_loss_accum  # already scaled inside microbatch step
+            mean_raw_reward = (
+                mean_raw_reward_acc / train_config.n_train_steps_per_rollout_batch
+            )
+            mean_advantages = (
+                mean_advantages_acc / train_config.n_train_steps_per_rollout_batch
+            )
 
             print(
                 f"[update] opt_step={opt_steps}/{train_config.n_train_steps_per_rollout_batch} "
@@ -423,24 +439,30 @@ def update_policy_on_rollouts(
                 f" approx_kl={approx_kl_step:.8f} approx_kl_ppo={approx_kl_ppo_step:.8f} "
             )
             token_entropy = torch.tensor(dataset.token_entropy).mean().item()
-            wandb.log(
-                {
-                    "train/loss": step_loss,
-                    "train/token_entropy": token_entropy,
-                    "train/approx_kl": approx_kl_step,
-                    "train/approx_kl_ppo": approx_kl_ppo_step,
-                    "train/pi_ratio_clip_frac": metadata["clip_frac"],
-                    "train/pi_ratio_mean": metadata["ratio_mean"],
-                    "train/pi_ratio_min": metadata["ratio_min"],
-                    "train/pi_ratio_max": metadata["ratio_max"],
-                    "train_step": global_step_,
-                }
-            )
+            log_data = {
+                "train/loss": step_loss,
+                "train/token_entropy": token_entropy,
+                "train/approx_kl": approx_kl_step,
+                "train/approx_kl_ppo": approx_kl_ppo_step,
+                "train/pi_ratio_clip_frac": metadata.get("clip_frac"),
+                "train/pi_ratio_mean": metadata.get("ratio_mean"),
+                "train/pi_ratio_min": metadata.get("ratio_min"),
+                "train/pi_ratio_max": metadata.get("ratio_max"),
+                "train_step": global_step_,
+            }
+            if loss_type == "no_baseline":
+                log_data["train/mean_raw_reward"] = mean_raw_reward
+            if loss_type == "reinforce_with_baseline":
+                log_data["train/mean_advantages"] = mean_advantages
+
+            wandb.log(log_data)
 
             batch_loss_accum = 0.0
             approx_kl_acc = 0.0
             approx_kl_ppo_acc = 0.0
             kl_denom_acc = 0.0
+            mean_raw_reward_acc = 0.0
+            mean_advantages_acc = 0.0
 
     return global_step_
 
@@ -661,6 +683,7 @@ def train_grpo_single_gpu(
             raw_rewards=raw_rewards,
             advantages=advantages,
             global_step=global_step,
+            loss_type=train_config.loss_type,
         )
 
         # Periodic eval (same swap pattern)
